@@ -1,0 +1,161 @@
+clear; clc;
+
+%% =============== 1. パラメータ設定 ===============
+m1 = 1900;   % 車体質量 [kg]
+m2 = 50;     % 前車軸質量 [kg]
+m3 = 50;     % 後車軸質量 [kg]
+k1 = 33e3;   % 前サス剛性 [N/m]
+k2 = 31e3;   % 後サス剛性 [N/m]
+k3 = 260e3;  % 前タイヤ剛性 [N/m]
+k4 = 260e3;  % 後タイヤ剛性 [N/m]
+c1 = 300;    % 前サス減衰 [Ns/m]
+c2 = 300;    % 後サス減衰 [Ns/m]
+l1 = 1.34;   % 重心から前車軸までの距離 [m]
+l2 = 1.46;   % 重心から後車軸までの距離 [m]
+J  = 3000;   % 車体慣性モーメント(ピッチング) [kg*m^2]
+
+% 走行条件
+v = 5;        % 走行速度 [m/s]
+t_end = 10;     % シミュレーション時間 [s]
+dt = 0.001;
+t = 0:dt:t_end;
+N = length(t);
+
+%% =============== 2. 台形型ハンプのパラメータをまとめて定義 ===============
+hump_height     = 0.15;   % ハンプ最大高さ [m]
+ramp_up_length  = 20;    % ランプアップ（上昇部）長さ [m]
+top_length      = 10;     % 上辺平坦部長さ [m]
+ramp_down_length= 20;    % ランプダウン（下降部）長さ [m]
+
+% ハンプを定義する無名関数
+road_hump = @(s) defineRoadHump(s, hump_height, ramp_up_length, top_length, ramp_down_length);
+
+%% =============== シミュレーションを2回実行(ピッチ有/無) ===============
+simulateModel = @(pitch_flag) simCarModel( ...
+    m1, m2, m3, k1, k2, k3, k4, c1, c2, l1, l2, J, ...
+    v, t, dt, road_hump, pitch_flag );
+
+% 1) ピッチ有り
+pitch_on_data   = simulateModel(true);
+theta_pitch_on  = pitch_on_data.theta;
+Fy1_pitch_on    = pitch_on_data.Fy1;
+
+% 2) ピッチ無し
+pitch_off_data  = simulateModel(false);
+theta_pitch_off = pitch_off_data.theta;
+Fy1_pitch_off   = pitch_off_data.Fy1;
+
+%% =============== 3. ピッチ角応答 (ピッチ有りの場合) ===============
+figure('Color','w');
+plot(t, theta_pitch_on * 180/pi, 'k','LineWidth',1.5);
+xlabel('時間 [s]','FontSize',14);
+ylabel('ピッチ角 [deg]','FontSize',14);
+grid on; set(gca,'FontSize',14);
+
+
+%% =============== 4. 前車軸タイヤ力の比較 (ピッチ有 vs. 無) ===============
+figure('Color','w');
+plot(t, Fy1_pitch_on, 'b','LineWidth',1.5); hold on;
+plot(t, Fy1_pitch_off,'r--','LineWidth',1.5);
+xlabel('時間 [s]','FontSize',14);
+ylabel('前車軸タイヤ力 [N]','FontSize',14);
+legend({'ピッチ有り','ピッチ無し'}, 'FontSize',14,'Location','best');
+grid on; set(gca,'FontSize',14);
+
+
+%% =============== 5. ピッチ有り・無しの差をRMSEで示す ===============
+diff_Fy1 = Fy1_pitch_on - Fy1_pitch_off;
+RMSE_val = sqrt( mean( diff_Fy1.^2 ) );
+
+fprintf('\n=== 前車軸タイヤ力: ピッチ有り vs. ピッチ無しの差(RMSE) ===\n');
+fprintf('RMSE = %.4f [N]\n', RMSE_val);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 以下、サブ関数群
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% 台形ハンプを定義する関数
+function h = defineRoadHump(s, hump_height, ramp_up_len, top_len, ramp_down_len)
+    % ramp_up_len + top_len + ramp_down_len がハンプ全長
+    % たとえば 10 + 5 + 10 = 25[m] 総長
+
+    s_up    = 0;                      % 上昇開始
+    s_top   = s_up + ramp_up_len;     % 上辺開始
+    s_down  = s_top + top_len;        % 下降開始
+    s_end   = s_down + ramp_down_len; % ハンプ終了
+
+    h = ...
+        (s < s_up).*0 + ...
+        ((s >= s_up)  & (s < s_top))  .* ( (s - s_up)/ramp_up_len * hump_height ) + ...
+        ((s >= s_top) & (s < s_down)) .* hump_height + ...
+        ((s >= s_down)& (s < s_end))  .* ( hump_height - ((s - s_down)/ramp_down_len * hump_height) ) + ...
+        (s >= s_end).*0;
+end
+
+%% シミュレーション関数 (ピッチ有り/無し共通)
+function result = simCarModel(m1,m2,m3,k1,k2,k3,k4,c1,c2,l1,l2,J,...
+                              v,t,dt,road_func,pitch_flag)
+    % 出力構造体 (ピッチ角theta, 前車軸タイヤ力Fy1)
+    result.theta = zeros(length(t),1);
+    result.Fy1   = zeros(length(t),1);
+
+    % 状態変数
+    x1     = zeros(length(t),1);  dx1    = zeros(length(t),1);
+    theta  = zeros(length(t),1);  dtheta = zeros(length(t),1);
+    x2     = zeros(length(t),1);  dx2    = zeros(length(t),1);
+    x3     = zeros(length(t),1);  dx3    = zeros(length(t),1);
+
+    Fy1_all= zeros(length(t),1);
+
+    for i=1:length(t)-1
+        s_current = v * t(i);
+
+        % 前/後車軸の路面高さ
+        y1 = road_func(s_current - l1);
+        y2 = road_func(s_current + l2);
+
+        % サス力(前/後)
+        Ff = -k1*((x1(i)- l1*theta(i)) - x2(i)) ...
+             - c1*((dx1(i)- l1*dtheta(i)) - dx2(i));
+        Fr = -k2*((x1(i)+ l2*theta(i)) - x3(i)) ...
+             - c2*((dx1(i)+ l2*dtheta(i)) - dx3(i));
+
+        % タイヤ力 (前/後)
+        Fy1 = -k3*(x2(i) - y1);
+        Fy2 = -k4*(x3(i) - y2);
+        Fy1_all(i) = Fy1;
+
+        % 車体の運動方程式 (m1, J)
+        ddx1 = 2*(Ff + Fr)/m1;
+        if pitch_flag
+            ddtheta = 2*(-Ff*l1 + Fr*l2)/J;
+        else
+            ddtheta = 0;  
+        end
+
+        % 前車軸 (m2), 後車軸 (m3)
+        ddx2 = (Fy1 - Ff)/m2;
+        ddx3 = (Fy2 - Fr)/m3;
+
+        % オイラー法で更新
+        dx1(i+1)   = dx1(i)    + ddx1*dt;
+        x1(i+1)    = x1(i)     + dx1(i)*dt;
+
+        dtheta(i+1)= dtheta(i) + ddtheta*dt;
+        theta(i+1) = theta(i)  + dtheta(i)*dt;
+
+        dx2(i+1)   = dx2(i)    + ddx2*dt;
+        x2(i+1)    = x2(i)     + dx2(i)*dt;
+
+        dx3(i+1)   = dx3(i)    + ddx3*dt;
+        x3(i+1)    = x3(i)     + dx3(i)*dt;
+    end
+
+    % 最終ステップ (末端補完)
+    y1_end = road_func(v*t(end) - l1);
+    Fy1_all(end) = -k3*(x2(end) - y1_end);
+
+    % 結果セット
+    result.theta = theta;
+    result.Fy1   = Fy1_all;
+end
